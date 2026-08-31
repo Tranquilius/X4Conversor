@@ -7,6 +7,7 @@ import { createDropzone } from './dropzone';
 import { createOptionsPanel } from './options-panel';
 import { createProgressView } from './progress';
 import { createReviewPanel } from './review-panel';
+import { saveMultipleFiles, saveSingleFile, type ExportedFile } from './save-file';
 
 function createPipelineWorker(): Worker {
   return new Worker(new URL('../worker/pipeline.worker.ts', import.meta.url), { type: 'module' });
@@ -17,31 +18,40 @@ function summaryFromReport(report: PipelineReport): string {
   return ghost?.details[0] ?? '';
 }
 
-function downloadBlob(data: ArrayBuffer, fileName: string, mimeType: string): void {
-  const blob = new Blob([data], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+type ExportFormat = 'txt' | 'epub' | 'report';
+
+interface DocumentEntry {
+  id: string;
+  file: File;
+  fileHash: string | null;
+  /** Cloned from the shared template at drop time; carries this document's own ghost-space overrides from then on. */
+  options: PipelineOptions;
+  status: 'processing' | 'ready' | 'error';
+  card: HTMLElement;
+  statusEl: HTMLElement;
+  warningsEl: HTMLElement;
+  progressView: ReturnType<typeof createProgressView>;
+  reviewPanel: ReturnType<typeof createReviewPanel>;
+  chapterEditor: ReturnType<typeof createChapterEditor>;
+  exportRow: HTMLElement;
 }
 
 export function mountApp(root: HTMLElement): void {
-  let options: PipelineOptions = loadPrefs(DEFAULT_OPTIONS);
+  let optionsTemplate: PipelineOptions = loadPrefs(DEFAULT_OPTIONS);
   const worker = createPipelineWorker();
-  let currentFile: File | null = null;
-  let currentFileHash: string | null = null;
   let reqCounter = 0;
+  let docCounter = 0;
 
+  const documents = new Map<string, DocumentEntry>();
   const pending = new Map<string, (msg: WorkerResponse) => void>();
+  const progressRoutes = new Map<string, string>(); // requestId -> documentId
 
   worker.addEventListener('message', (event: MessageEvent<WorkerResponse>) => {
     const msg = event.data;
     if (msg.type === 'progress') {
-      progressView.update(msg.stage, msg.fraction);
+      const docId = progressRoutes.get(msg.requestId);
+      const doc = docId ? documents.get(docId) : undefined;
+      doc?.progressView.update(msg.stage, msg.fraction);
       return;
     }
     const handler = pending.get(msg.requestId);
@@ -76,140 +86,245 @@ export function mountApp(root: HTMLElement): void {
   `;
   root.appendChild(header);
 
-  const warningsEl = document.createElement('div');
-  root.appendChild(warningsEl);
-
   const dropzone = createDropzone((files) => {
     void handleFiles(files);
   });
   root.appendChild(dropzone);
 
-  const progressView = createProgressView();
-  root.appendChild(progressView.el);
-
   const optionsPanel = createOptionsPanel(
-    () => options,
+    () => optionsTemplate,
     (next) => {
-      options = next;
-      savePrefs(options);
-      void refinalize();
+      optionsTemplate = next;
+      savePrefs(optionsTemplate);
+      for (const doc of documents.values()) {
+        doc.options = { ...optionsTemplate, ghostSpaceGroupOverrides: doc.options.ghostSpaceGroupOverrides };
+        if (doc.status === 'ready') void refinalize(doc);
+      }
     },
   );
   root.appendChild(optionsPanel.el);
 
-  const reviewPanel = createReviewPanel((key, accepted) => {
-    if (!currentFileHash) return;
-    options = {
-      ...options,
-      ghostSpaceGroupOverrides: { ...options.ghostSpaceGroupOverrides, [key]: accepted },
-    };
-    const decisions = loadReviewDecisions(currentFileHash);
-    decisions[key] = accepted;
-    saveReviewDecisions(currentFileHash, decisions);
-    void refinalize();
-  });
-  root.appendChild(reviewPanel.el);
+  const resultsList = document.createElement('div');
+  root.appendChild(resultsList);
 
-  const chapterEditor = createChapterEditor((chapters: ChapterMark[]) => {
-    void refinalizeWithChapters(chapters);
-  });
-  root.appendChild(chapterEditor.el);
-
-  const exportRow = document.createElement('div');
-  exportRow.className = 'export-row';
-  exportRow.hidden = true;
-  exportRow.innerHTML = `
-    <button type="button" class="primary" data-format="txt">Export TXT</button>
-    <button type="button" class="secondary" data-format="epub">Export EPUB</button>
-    <button type="button" class="secondary" data-format="report">Download report</button>
+  const batchExportRow = document.createElement('div');
+  batchExportRow.className = 'export-row';
+  batchExportRow.hidden = true;
+  batchExportRow.innerHTML = `
+    <button type="button" class="primary" data-batch-format="txt">Export all as TXT</button>
+    <button type="button" class="secondary" data-batch-format="epub">Export all as EPUB</button>
   `;
-  root.appendChild(exportRow);
-  exportRow.querySelectorAll('button[data-format]').forEach((btn) => {
+  root.appendChild(batchExportRow);
+  batchExportRow.querySelectorAll('button[data-batch-format]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const format = (btn as HTMLButtonElement).dataset.format as 'txt' | 'epub' | 'report';
-      void doExport(format);
+      const format = (btn as HTMLButtonElement).dataset.batchFormat as 'txt' | 'epub';
+      void doBatchExport(format);
     });
   });
 
+  function updateBatchExportVisibility(): void {
+    const readyCount = Array.from(documents.values()).filter((d) => d.status === 'ready').length;
+    batchExportRow.hidden = readyCount < 2;
+  }
+
   async function handleFiles(files: File[]): Promise<void> {
-    // v1: processes one file at a time, sequentially.
+    // Processed one at a time, sequentially, but every file keeps its own
+    // card and its own worker-side state — earlier results stay downloadable
+    // once later files finish.
     for (const file of files) {
       await convertOne(file);
     }
   }
 
-  async function convertOne(file: File): Promise<void> {
-    currentFile = file;
-    warningsEl.innerHTML = '';
+  function createDocumentCard(fileName: string): {
+    card: HTMLElement;
+    statusEl: HTMLElement;
+    warningsEl: HTMLElement;
+    progressView: ReturnType<typeof createProgressView>;
+    reviewPanel: ReturnType<typeof createReviewPanel>;
+    chapterEditor: ReturnType<typeof createChapterEditor>;
+    exportRow: HTMLElement;
+  } {
+    const card = document.createElement('div');
+    card.className = 'document-card';
+
+    const headerEl = document.createElement('div');
+    headerEl.className = 'document-card-header';
+    headerEl.innerHTML = `<strong></strong><span class="document-status"></span>`;
+    (headerEl.querySelector('strong') as HTMLElement).textContent = fileName;
+    const statusEl = headerEl.querySelector('.document-status') as HTMLElement;
+    card.appendChild(headerEl);
+
+    const warningsEl = document.createElement('div');
+    card.appendChild(warningsEl);
+
+    const progressView = createProgressView();
+    card.appendChild(progressView.el);
+
+    const reviewPanel = createReviewPanel((key, accepted) => {
+      const doc = findDocByCard(card);
+      if (!doc || !doc.fileHash) return;
+      doc.options = {
+        ...doc.options,
+        ghostSpaceGroupOverrides: { ...doc.options.ghostSpaceGroupOverrides, [key]: accepted },
+      };
+      const decisions = loadReviewDecisions(doc.fileHash);
+      decisions[key] = accepted;
+      saveReviewDecisions(doc.fileHash, decisions);
+      void refinalize(doc);
+    });
+    card.appendChild(reviewPanel.el);
+
+    const chapterEditor = createChapterEditor((chapters: ChapterMark[]) => {
+      const doc = findDocByCard(card);
+      if (!doc) return;
+      void refinalizeWithChapters(doc, chapters);
+    });
+    card.appendChild(chapterEditor.el);
+
+    const exportRow = document.createElement('div');
+    exportRow.className = 'export-row';
     exportRow.hidden = true;
-    progressView.show();
-    progressView.update('geometria', 0);
+    exportRow.innerHTML = `
+      <button type="button" class="primary" data-format="txt">Export TXT</button>
+      <button type="button" class="secondary" data-format="epub">Export EPUB</button>
+      <button type="button" class="secondary" data-format="report">Download report</button>
+    `;
+    exportRow.querySelectorAll('button[data-format]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const doc = findDocByCard(card);
+        if (!doc) return;
+        const format = (btn as HTMLButtonElement).dataset.format as ExportFormat;
+        void doExport(doc, format);
+      });
+    });
+    card.appendChild(exportRow);
+
+    resultsList.appendChild(card);
+    return { card, statusEl, warningsEl, progressView, reviewPanel, chapterEditor, exportRow };
+  }
+
+  function findDocByCard(card: HTMLElement): DocumentEntry | undefined {
+    for (const doc of documents.values()) {
+      if (doc.card === card) return doc;
+    }
+    return undefined;
+  }
+
+  async function convertOne(file: File): Promise<void> {
+    docCounter += 1;
+    const id = `doc-${docCounter}`;
+    const parts = createDocumentCard(file.name);
+    const doc: DocumentEntry = {
+      id,
+      file,
+      fileHash: null,
+      options: { ...optionsTemplate },
+      status: 'processing',
+      card: parts.card,
+      statusEl: parts.statusEl,
+      warningsEl: parts.warningsEl,
+      progressView: parts.progressView,
+      reviewPanel: parts.reviewPanel,
+      chapterEditor: parts.chapterEditor,
+      exportRow: parts.exportRow,
+    };
+    documents.set(id, doc);
+
+    doc.statusEl.textContent = 'Processing…';
+    doc.progressView.show();
+    doc.progressView.update('geometria', 0);
 
     try {
       const buffer = await file.arrayBuffer();
-      currentFileHash = await hashFile(buffer);
-      const savedDecisions = loadReviewDecisions(currentFileHash);
-      options = { ...options, ghostSpaceGroupOverrides: savedDecisions };
+      doc.fileHash = await hashFile(buffer);
+      const savedDecisions = loadReviewDecisions(doc.fileHash);
+      doc.options = { ...doc.options, ghostSpaceGroupOverrides: savedDecisions };
 
+      const requestId = nextRequestId();
+      progressRoutes.set(requestId, id);
       const msg = await send({
         type: 'convert',
-        requestId: nextRequestId(),
+        requestId,
+        documentId: id,
         fileName: file.name,
         fileBuffer: buffer,
-        options,
+        options: doc.options,
       });
+      progressRoutes.delete(requestId);
 
       if (msg.type !== 'convert-done') return;
 
       if (msg.hasNoTextLayer) {
-        warningsEl.innerHTML =
+        doc.warningsEl.innerHTML =
           '<div class="warning">This PDF does not seem to have a text layer (image-only ' +
           'pages). Run OCR before converting — for example, with ' +
           '<code>ocrmypdf input.pdf output.pdf</code> — then upload the result here.</div>';
       }
 
-      reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), options.ghostSpaceGroupOverrides);
-      chapterEditor.render(msg.chapters);
-      exportRow.hidden = false;
+      doc.reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), doc.options.ghostSpaceGroupOverrides);
+      doc.chapterEditor.render(msg.chapters);
+      doc.exportRow.hidden = false;
+      doc.status = 'ready';
+      doc.statusEl.textContent = 'Ready';
     } catch (err) {
-      warningsEl.innerHTML = `<div class="warning">Error converting "${file.name}": ${
+      doc.warningsEl.innerHTML = `<div class="warning">Error converting "${file.name}": ${
         err instanceof Error ? err.message : String(err)
       }</div>`;
+      doc.status = 'error';
+      doc.statusEl.textContent = 'Error';
     } finally {
-      progressView.hide();
+      doc.progressView.hide();
+      updateBatchExportVisibility();
     }
   }
 
-  async function refinalize(): Promise<void> {
-    if (!currentFile) return;
-    const msg = await send({ type: 'finalize', requestId: nextRequestId(), options });
+  async function refinalize(doc: DocumentEntry): Promise<void> {
+    const msg = await send({ type: 'finalize', requestId: nextRequestId(), documentId: doc.id, options: doc.options });
     if (msg.type !== 'finalize-done') return;
-    reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), options.ghostSpaceGroupOverrides);
-    chapterEditor.render(msg.chapters);
+    doc.reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), doc.options.ghostSpaceGroupOverrides);
+    doc.chapterEditor.render(msg.chapters);
   }
 
-  async function refinalizeWithChapters(chapters: ChapterMark[]): Promise<void> {
-    if (!currentFile) return;
+  async function refinalizeWithChapters(doc: DocumentEntry, chapters: ChapterMark[]): Promise<void> {
     const msg = await send({
       type: 'finalize',
       requestId: nextRequestId(),
-      options,
+      documentId: doc.id,
+      options: doc.options,
       chapterOverride: chapters,
     });
     if (msg.type !== 'finalize-done') return;
-    reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), options.ghostSpaceGroupOverrides);
+    doc.reviewPanel.render(msg.ghostSpaceGroups, summaryFromReport(msg.report), doc.options.ghostSpaceGroupOverrides);
   }
 
-  async function doExport(format: 'txt' | 'epub' | 'report'): Promise<void> {
-    if (!currentFile) return;
+  async function exportOne(doc: DocumentEntry, format: ExportFormat): Promise<ExportedFile | null> {
     const msg = await send({
       type: 'export',
       requestId: nextRequestId(),
+      documentId: doc.id,
       format,
-      options,
-      epubMeta: { title: currentFile.name.replace(/\.(pdf|txt)$/i, '') },
+      options: doc.options,
+      epubMeta: { title: doc.file.name.replace(/\.(pdf|txt)$/i, '') },
     });
-    if (msg.type !== 'export-done') return;
-    downloadBlob(msg.data, msg.fileName, msg.mimeType);
+    if (msg.type !== 'export-done') return null;
+    return { fileName: msg.fileName, data: msg.data, mimeType: msg.mimeType };
+  }
+
+  async function doExport(doc: DocumentEntry, format: ExportFormat): Promise<void> {
+    const exported = await exportOne(doc, format);
+    if (!exported) return;
+    await saveSingleFile(exported);
+  }
+
+  async function doBatchExport(format: 'txt' | 'epub'): Promise<void> {
+    const readyDocs = Array.from(documents.values()).filter((d) => d.status === 'ready');
+    const exported: ExportedFile[] = [];
+    for (const doc of readyDocs) {
+      const file = await exportOne(doc, format);
+      if (file) exported.push(file);
+    }
+    if (exported.length === 0) return;
+    await saveMultipleFiles(exported);
   }
 }

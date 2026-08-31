@@ -34,6 +34,16 @@
   box-sizing: border-box;
 }
 
+/*
+ * Without this, `display: flex` on .export-row/.options-grid etc. wins the
+ * cascade over the UA stylesheet's `[hidden] { display: none }` (both are
+ * normal-priority author-vs-UA rules, and author always wins), so elements
+ * stay visible — and clickable — while `hidden` is still set.
+ */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -220,4 +230,41 @@ button.secondary {
 .diagnostics-summary {
   font-size: 0.95rem;
   line-height: 1.5;
+}
+
+.document-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.document-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.document-card-header strong {
+  overflow-wrap: anywhere;
+}
+
+.document-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.document-card .panel {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin-top: 1rem;
+}
+
+.document-card .panel + .panel {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
 }
