@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.claude/
+*.tsbuildinfo
+
+# Raw lexicon sources (large, re-downloadable — see README > Lexicon).
+# The final generated artifact, public/lexicon/pt_br.json, IS versioned.
+data/lexicon-src/
