@@ -37,7 +37,10 @@ interface WorkerState {
   detectedLanguage: DetectedLanguage;
 }
 
-let state: WorkerState | null = null;
+// Keyed by documentId, so several documents converted in the same session
+// (e.g. a multi-file drop) each keep their own state instead of the last
+// one clobbering the others.
+const states = new Map<string, WorkerState>();
 
 function post(msg: WorkerResponse, transfer: Transferable[] = []): void {
   self.postMessage(msg, transfer);
@@ -68,13 +71,13 @@ async function handleConvert(msg: ConvertRequestMessage): Promise<void> {
   });
 
   const finalized = finalizeDocument({ extracted, lexicon, options: msg.options });
-  state = {
+  states.set(msg.documentId, {
     extracted,
     lexicon,
     docModel: finalized.docModel,
     report: finalized.report,
     detectedLanguage: finalized.detectedLanguage,
-  };
+  });
 
   post({
     type: 'convert-done',
@@ -91,6 +94,7 @@ async function handleConvert(msg: ConvertRequestMessage): Promise<void> {
 }
 
 function handleFinalize(msg: FinalizeRequestMessage): void {
+  const state = states.get(msg.documentId);
   if (!state) {
     post({ type: 'error', requestId: msg.requestId, message: 'No document converted yet.' });
     return;
@@ -101,12 +105,12 @@ function handleFinalize(msg: FinalizeRequestMessage): void {
     options: msg.options,
     chapterOverride: msg.chapterOverride,
   });
-  state = {
+  states.set(msg.documentId, {
     ...state,
     docModel: finalized.docModel,
     report: finalized.report,
     detectedLanguage: finalized.detectedLanguage,
-  };
+  });
 
   post({
     type: 'finalize-done',
@@ -118,6 +122,7 @@ function handleFinalize(msg: FinalizeRequestMessage): void {
 }
 
 async function handleExport(msg: ExportRequestMessage): Promise<void> {
+  const state = states.get(msg.documentId);
   if (!state) {
     post({ type: 'error', requestId: msg.requestId, message: 'No document ready to export.' });
     return;

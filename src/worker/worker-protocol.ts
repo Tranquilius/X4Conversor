@@ -3,6 +3,8 @@ import type { ChapterMark, GhostSpaceGroup, PipelineOptions, PipelineReport } fr
 export interface ConvertRequestMessage {
   type: 'convert';
   requestId: string;
+  /** Identifies this document across convert/finalize/export calls, so the worker can hold state for several documents at once. */
+  documentId: string;
   fileName: string;
   fileBuffer: ArrayBuffer;
   options: PipelineOptions;
@@ -11,6 +13,7 @@ export interface ConvertRequestMessage {
 export interface FinalizeRequestMessage {
   type: 'finalize';
   requestId: string;
+  documentId: string;
   /** Reapplies stage 7/8 over the already-extracted paragraphs (cheap, no re-parsing). */
   options: PipelineOptions;
   chapterOverride?: ChapterMark[];
@@ -19,6 +22,7 @@ export interface FinalizeRequestMessage {
 export interface ExportRequestMessage {
   type: 'export';
   requestId: string;
+  documentId: string;
   format: 'txt' | 'epub' | 'report';
   options: PipelineOptions;
   epubMeta?: { title: string; author?: string; language?: string };
