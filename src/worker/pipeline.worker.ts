@@ -151,6 +151,7 @@ async function handleExport(msg: ExportRequestMessage): Promise<void> {
       title: msg.epubMeta?.title ?? baseName,
       author: msg.epubMeta?.author,
       language: msg.epubMeta?.language ?? detectedLanguage,
+      einkOptimized: msg.options.epubEinkOptimized,
     });
     post(
       {

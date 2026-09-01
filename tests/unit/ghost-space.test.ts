@@ -117,4 +117,25 @@ describe('stage 7 — ghost space repair', () => {
     expect(result.output).toEqual(doc);
     expect(result.stats.changed).toBe(0);
   });
+
+  it('extraLexiconWords protects a rare proper noun that would otherwise never merge (band 3)', () => {
+    // "organa" is not a dictionary word and appears only once, so it never
+    // reaches the 3+ repeat threshold that would auto-admit it into the
+    // local document lexicon — without help, "Morgana" split as "M organa"
+    // stays band 3 (merged form invalid) and is never merged.
+    const doc = buildRepeatedDocument(['Foi então que M organa apareceu no topo da colina.']);
+
+    const withoutExtra = ghostSpaceStage(doc, lexicon, DEFAULT_OPTIONS);
+    const joinedWithout = withoutExtra.output.map((p) => p.text).join('\n');
+    expect(joinedWithout).toContain('M organa');
+    expect(joinedWithout).not.toContain('Morgana');
+
+    const withExtra = ghostSpaceStage(doc, lexicon, {
+      ...DEFAULT_OPTIONS,
+      extraLexiconWords: ['Morgana'],
+    });
+    const joinedWith = withExtra.output.map((p) => p.text).join('\n');
+    expect(joinedWith).toContain('Morgana');
+    expect(joinedWith).not.toContain('M organa');
+  });
 });

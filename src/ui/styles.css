@@ -139,6 +139,24 @@ h1 {
   font-size: 0.95rem;
 }
 
+.options-grid label.full-row {
+  grid-column: 1 / -1;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.options-grid textarea {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+
 .group-row {
   display: flex;
   align-items: center;

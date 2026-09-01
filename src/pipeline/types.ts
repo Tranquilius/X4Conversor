@@ -139,6 +139,13 @@ export interface PipelineOptions {
   /** Review decisions persisted per group (key -> accept?). Overrides the band's default. */
   ghostSpaceGroupOverrides: Record<string, boolean>;
   extraLexiconWords: string[];
+  /**
+   * Applies the EPUB CSS/layout profile tuned for the Xteink X4's built-in
+   * reader (see `09-export-epub.ts`'s CSS_EINK) instead of the general-
+   * purpose default. Only affects EPUB export — TXT is unaffected. On by
+   * default: this app's whole purpose is feeding the X4.
+   */
+  epubEinkOptimized: boolean;
   export: {
     txt: {
       bom: boolean;
@@ -153,6 +160,7 @@ export const DEFAULT_OPTIONS: PipelineOptions = {
   ghostSpaceEnabled: true,
   ghostSpaceGroupOverrides: {},
   extraLexiconWords: [],
+  epubEinkOptimized: true,
   export: {
     txt: { bom: false, eol: 'LF' },
   },

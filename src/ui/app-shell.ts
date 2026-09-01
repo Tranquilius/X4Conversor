@@ -94,12 +94,17 @@ export function mountApp(root: HTMLElement): void {
   const optionsPanel = createOptionsPanel(
     () => optionsTemplate,
     (next) => {
+      // removeHeadersFooters/normalizeQuotesAndDashes are consumed by
+      // extractAndReflow (stages 1-6, run once at initial conversion) — NOT
+      // by finalizeDocument (stages 7-8, what refinalize() re-runs). Without
+      // this check, flipping either of those two checkboxes after a document
+      // is already converted would silently do nothing to it.
+      const needsReconvert =
+        optionsTemplate.removeHeadersFooters !== next.removeHeadersFooters ||
+        optionsTemplate.normalizeQuotesAndDashes !== next.normalizeQuotesAndDashes;
       optionsTemplate = next;
       savePrefs(optionsTemplate);
-      for (const doc of documents.values()) {
-        doc.options = { ...optionsTemplate, ghostSpaceGroupOverrides: doc.options.ghostSpaceGroupOverrides };
-        if (doc.status === 'ready') void refinalize(doc);
-      }
+      void applyOptionsToDocuments(needsReconvert);
     },
   );
   root.appendChild(optionsPanel.el);
@@ -211,43 +216,35 @@ export function mountApp(root: HTMLElement): void {
     return undefined;
   }
 
-  async function convertOne(file: File): Promise<void> {
-    docCounter += 1;
-    const id = `doc-${docCounter}`;
-    const parts = createDocumentCard(file.name);
-    const doc: DocumentEntry = {
-      id,
-      file,
-      fileHash: null,
-      options: { ...optionsTemplate },
-      status: 'processing',
-      card: parts.card,
-      statusEl: parts.statusEl,
-      warningsEl: parts.warningsEl,
-      progressView: parts.progressView,
-      reviewPanel: parts.reviewPanel,
-      chapterEditor: parts.chapterEditor,
-      exportRow: parts.exportRow,
-    };
-    documents.set(id, doc);
-
+  /**
+   * Runs the full convert pipeline (stages 1-6 in the worker, via a fresh
+   * 'convert' message) against `doc.file` and applies the result to its
+   * already-existing card. Used both for a document's first conversion and
+   * to re-convert one whose extraction-affecting options changed after the
+   * fact (see applyOptionsToDocuments) — unlike refinalize(), which only
+   * cheaply re-runs stages 7-8 and cannot pick up such a change.
+   */
+  async function runConversion(doc: DocumentEntry): Promise<void> {
+    doc.status = 'processing';
     doc.statusEl.textContent = 'Processing…';
+    doc.warningsEl.innerHTML = '';
+    doc.exportRow.hidden = true;
     doc.progressView.show();
     doc.progressView.update('geometria', 0);
 
     try {
-      const buffer = await file.arrayBuffer();
+      const buffer = await doc.file.arrayBuffer();
       doc.fileHash = await hashFile(buffer);
       const savedDecisions = loadReviewDecisions(doc.fileHash);
       doc.options = { ...doc.options, ghostSpaceGroupOverrides: savedDecisions };
 
       const requestId = nextRequestId();
-      progressRoutes.set(requestId, id);
+      progressRoutes.set(requestId, doc.id);
       const msg = await send({
         type: 'convert',
         requestId,
-        documentId: id,
-        fileName: file.name,
+        documentId: doc.id,
+        fileName: doc.file.name,
         fileBuffer: buffer,
         options: doc.options,
       });
@@ -268,7 +265,7 @@ export function mountApp(root: HTMLElement): void {
       doc.status = 'ready';
       doc.statusEl.textContent = 'Ready';
     } catch (err) {
-      doc.warningsEl.innerHTML = `<div class="warning">Error converting "${file.name}": ${
+      doc.warningsEl.innerHTML = `<div class="warning">Error converting "${doc.file.name}": ${
         err instanceof Error ? err.message : String(err)
       }</div>`;
       doc.status = 'error';
@@ -276,6 +273,48 @@ export function mountApp(root: HTMLElement): void {
     } finally {
       doc.progressView.hide();
       updateBatchExportVisibility();
+    }
+  }
+
+  async function convertOne(file: File): Promise<void> {
+    docCounter += 1;
+    const id = `doc-${docCounter}`;
+    const parts = createDocumentCard(file.name);
+    const doc: DocumentEntry = {
+      id,
+      file,
+      fileHash: null,
+      options: { ...optionsTemplate },
+      status: 'processing',
+      card: parts.card,
+      statusEl: parts.statusEl,
+      warningsEl: parts.warningsEl,
+      progressView: parts.progressView,
+      reviewPanel: parts.reviewPanel,
+      chapterEditor: parts.chapterEditor,
+      exportRow: parts.exportRow,
+    };
+    documents.set(id, doc);
+    await runConversion(doc);
+  }
+
+  /**
+   * Applies the latest optionsTemplate to every open document. When an
+   * extraction-affecting option changed (needsReconvert), ready documents
+   * are fully re-converted, one at a time — same sequential policy as
+   * handleFiles(), and it keeps two re-convert calls from racing on the
+   * same document's worker-side state. Otherwise the cheap refinalize()
+   * path is used, same as before.
+   */
+  async function applyOptionsToDocuments(needsReconvert: boolean): Promise<void> {
+    for (const doc of documents.values()) {
+      doc.options = { ...optionsTemplate, ghostSpaceGroupOverrides: doc.options.ghostSpaceGroupOverrides };
+      if (doc.status !== 'ready') continue;
+      if (needsReconvert) {
+        await runConversion(doc);
+      } else {
+        void refinalize(doc);
+      }
     }
   }
 
