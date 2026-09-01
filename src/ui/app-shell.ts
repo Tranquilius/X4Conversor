@@ -132,6 +132,16 @@ export function mountApp(root: HTMLElement): void {
     batchExportRow.hidden = readyCount < 2;
   }
 
+  const kofiRow = document.createElement('div');
+  kofiRow.className = 'kofi-row';
+  kofiRow.innerHTML = `
+    <a class="kofi-button" href="https://ko-fi.com/tranquilius" target="_blank" rel="noopener noreferrer">
+      <span class="kofi-button-icon" aria-hidden="true">☕</span>
+      <span>Support this project on Ko-fi</span>
+    </a>
+  `;
+  root.appendChild(kofiRow);
+
   async function handleFiles(files: File[]): Promise<void> {
     // Processed one at a time, sequentially, but every file keeps its own
     // card and its own worker-side state — earlier results stay downloadable
