@@ -106,3 +106,92 @@ describe('stage 9 — EPUB export', () => {
     expect(ncx).toContain('Conteúdo');
   });
 });
+
+describe('stage 9 — EPUB export: e-ink optimization toggle', () => {
+  it('defaults to the e-ink profile (longhand margins, no bare "margin:" shorthand) when einkOptimized is omitted', async () => {
+    const bytes = await exportEpub(paragraphs, chapters, { title: 'Livro de Teste' });
+    const zip = await JSZip.loadAsync(bytes);
+    const css = await zip.file('OEBPS/style.css')!.async('string');
+    expect(css).toContain('margin-left: 6%');
+    expect(css).not.toMatch(/\bmargin\s*:\s*1em/);
+  });
+
+  it('einkOptimized: false restores the general-purpose profile', async () => {
+    const bytes = await exportEpub(paragraphs, chapters, {
+      title: 'Livro de Teste',
+      einkOptimized: false,
+    });
+    const zip = await JSZip.loadAsync(bytes);
+    const css = await zip.file('OEBPS/style.css')!.async('string');
+    expect(css).toContain('margin: 1em');
+    expect(css).not.toContain('margin-left: 6%');
+  });
+
+  it('e-ink profile still uses no flex, grid, float, or fixed positioning', async () => {
+    const bytes = await exportEpub(paragraphs, [], { title: 'Livro de Teste', einkOptimized: true });
+    const zip = await JSZip.loadAsync(bytes);
+    const css = await zip.file('OEBPS/style.css')!.async('string');
+    expect(css).not.toMatch(/flex|grid|float|position\s*:\s*fixed/i);
+  });
+});
+
+describe('stage 9 — EPUB export: front matter before the first chapter', () => {
+  it('keeps paragraphs that appear before the first detected chapter mark', async () => {
+    const paragraphsWithFrontMatter: Paragraph[] = [
+      { text: 'Este livro é dedicado a quem gosta de ler.', page: null },
+      { text: 'CAPÍTULO 1', page: null },
+      { text: 'O conteúdo do primeiro capítulo.', page: null },
+    ];
+    const chaptersStartingLate: ChapterMark[] = [
+      { paragraphIndex: 1, title: 'Capítulo 1', source: 'heuristic' },
+    ];
+    const bytes = await exportEpub(paragraphsWithFrontMatter, chaptersStartingLate, {
+      title: 'Livro de Teste',
+    });
+    const zip = await JSZip.loadAsync(bytes);
+
+    expect(zip.file('OEBPS/chap-000.xhtml')).not.toBeNull();
+    const frontMatter = await zip.file('OEBPS/chap-000.xhtml')!.async('string');
+    expect(frontMatter).toContain('dedicado a quem gosta de ler');
+
+    const opf = await zip.file('OEBPS/content.opf')!.async('string');
+    expect(opf).toContain('chap-000.xhtml');
+    const ncx = await zip.file('OEBPS/toc.ncx')!.async('string');
+    expect(ncx).toContain('chap-000.xhtml');
+  });
+
+  it('adds no extra file when the first chapter mark is already at paragraph 0', async () => {
+    const bytes = await exportEpub(paragraphs, chapters, { title: 'Livro de Teste' });
+    const zip = await JSZip.loadAsync(bytes);
+    expect(zip.file('OEBPS/chap-000.xhtml')).toBeNull();
+  });
+});
+
+describe('stage 9 — EPUB export: dc:identifier uniqueness', () => {
+  it('gives two books with the same title but different content different identifiers', async () => {
+    const bookA: Paragraph[] = [{ text: 'Conteúdo do livro A.', page: null }];
+    const bookB: Paragraph[] = [{ text: 'Conteúdo completamente diferente do livro B.', page: null }];
+
+    const bytesA = await exportEpub(bookA, [], { title: 'Mesmo Título' });
+    const bytesB = await exportEpub(bookB, [], { title: 'Mesmo Título' });
+
+    const opfA = await (await JSZip.loadAsync(bytesA)).file('OEBPS/content.opf')!.async('string');
+    const opfB = await (await JSZip.loadAsync(bytesB)).file('OEBPS/content.opf')!.async('string');
+
+    const idA = /<dc:identifier[^>]*>([^<]+)<\/dc:identifier>/.exec(opfA)?.[1];
+    const idB = /<dc:identifier[^>]*>([^<]+)<\/dc:identifier>/.exec(opfB)?.[1];
+
+    expect(idA).toBeTruthy();
+    expect(idB).toBeTruthy();
+    expect(idA).not.toBe(idB);
+  });
+
+  it('gives the same book the same identifier across repeated exports', async () => {
+    const bytes1 = await exportEpub(paragraphs, chapters, { title: 'Livro de Teste' });
+    const bytes2 = await exportEpub(paragraphs, chapters, { title: 'Livro de Teste' });
+
+    const opf1 = await (await JSZip.loadAsync(bytes1)).file('OEBPS/content.opf')!.async('string');
+    const opf2 = await (await JSZip.loadAsync(bytes2)).file('OEBPS/content.opf')!.async('string');
+    expect(opf1).toBe(opf2);
+  });
+});

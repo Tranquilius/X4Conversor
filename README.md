@@ -77,7 +77,10 @@ isolation (`src/pipeline/`):
 8. **Chapter detection** (`08-chapters.ts`) — the PDF outline as priority 1, a short-heading
    heuristic as priority 2. Editable in the UI before exporting.
 9. **Export** (`09-export-*.ts`) — TXT (configurable BOM/EOL), EPUB (JSZip, `mimetype` first/
-   uncompressed), an HTML change report.
+   uncompressed), an HTML change report. EPUB export has an "Optimize for e-ink readers (Xteink
+   X4)" toggle (on by default), which swaps in a CSS profile using longhand `margin-*` and
+   percentage side insets — the X4's built-in reader has been reported to drop shorthand `margin`
+   declarations and indentation, leaving body text with no visible side margin.
 
 All heavy processing runs in a **Web Worker** (`src/worker/pipeline.worker.ts`), split into two
 phases: `extractAndReflow` (expensive — includes PDF parsing) and `finalizeDocument` (cheap —
