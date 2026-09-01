@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://tranquilius.github.io/X4Conversor/sitemap.xml
